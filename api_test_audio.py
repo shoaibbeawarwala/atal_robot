@@ -1,64 +1,142 @@
-import openai
-import sounddevice as sd
 import os
-from dotenv import load_dotenv
+import sounddevice as sd
+import soundfile as sf
+import tempfile
+from openai import OpenAI
+import numpy as np
+import librosa
+import threading
 
-# Load environment variables
-load_dotenv()
+# Set your OpenAI API key here
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
-# Set OpenAI API key
-openai.api_key = os.getenv("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")
+# Parameters for audio recording
+DURATION = 10  # Adjust the duration of audio recording
 
-
-# Function to call OpenAI API and get response
-def call_openai_api(input_text):
-    response = openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": input_text}
-        ]
-    )
-    return response['choices'][0]['message']['content']
-
-
-# Function to record audio from microphone
 def record_audio():
-    duration = 5  # Record for 5 seconds
-    fs = 16000  # Sample rate
-    myrecording = sd.rec(int(duration * fs), samplerate=fs, channels=1)
     print("Recording audio...")
-    sd.wait()  # Wait until recording is finished
-    print("Recording completed.")
-    return myrecording
+    frames = []
 
+    # Capture audio for a fixed duration
+    print(f"Recording for {DURATION} seconds...")
+    audio_data = sd.rec(int(44100 * DURATION), samplerate=44100, channels=1, dtype='float32')
+    sd.wait()
+    frames.append(audio_data)
 
-# Function to transcribe audio using rev.ai
-def transcribe_audio(audio, rev_ai_api_key):
-    # Implement rev.ai transcription logic here
-    # For now, let's just return the audio as text
-    return "".join([str(x) for x in audio])
+    audio_data = np.concatenate(frames)
+    return audio_data
 
+def transcribe_audio(audio_data):
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_audio_file:
+        tmp_audio_file_path = tmp_audio_file.name
+        sf.write(tmp_audio_file_path, audio_data, 44100, subtype='PCM_16')
+        with open(tmp_audio_file_path, 'rb') as file:
+            response = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=file,
+                response_format="json"
+            )
+    os.remove(tmp_audio_file_path)
+    return response.text
 
-# Main function
+conversation_history = []
+
+def call_openai_api(input_text):
+    global conversation_history
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    # Add the current user input to the conversation history
+    conversation_history.append({"role": "user", "content": input_text})
+
+    # Create the prompt for GPT-3.5 using the conversation history
+    prompt = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        *conversation_history
+    ]
+
+    completion = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=prompt,
+        max_tokens=1024,
+        n=1,
+        stop=None,
+        temperature=0.7,
+    )
+
+    # Add the GPT-3.5 response to the conversation history
+    conversation_history.append({"role": "assistant", "content": completion.choices[0].message.content})
+
+    # Return the latest GPT-3.5 response
+    return completion.choices[0].message.content
+
+def text_to_speech(text, voice="echo"):
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    valid_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+    if voice not in valid_voices:
+        print(f"Invalid voice option: {voice}. Using 'echo' instead.")
+        voice = "echo"
+
+    speech_file_path = f"{os.path.splitext(os.path.basename(__file__))[0]}.wav"
+    response = client.audio.speech.create(
+        model="tts-1-hd",
+        voice=voice,
+        input=str(text)
+    )
+    response.stream_to_file(speech_file_path)
+    return speech_file_path
+
+def play_audio(file_path):
+    data, samplerate = sf.read(file_path)
+    sd.play(data, samplerate)
+    sd.wait()
+
+def timed_input(prompt, timeout=8):
+    print(prompt)
+    input_str = [None]  # Use a list to modify it within the nested function
+
+    def get_user_input():
+        input_str[0] = input()
+
+    input_thread = threading.Thread(target=get_user_input)
+    input_thread.daemon = True  # Ensure the thread does not prevent program exit
+    input_thread.start()
+    input_thread.join(timeout)
+
+    if input_thread.is_alive():
+        print("Continuing with the process...")  # or any other notification message
+
+    return input_str[0]
+
 def main():
+    global conversation_history
+    conversation_history = []
+
     while True:
-        # Record audio from microphone
-        audio = record_audio()
+        print("Starting audio recording...")
+        audio_data = record_audio()
+        print("Audio recorded. Transcribing...")
+        transcription = transcribe_audio(audio_data)
+        print("Transcription:", transcription)
 
-        # Transcribe audio using rev.ai
-        rev_ai_api_key = os.getenv("02LR7pfNZPqD8x7VXnK-xgY4qqzJDjId1qXS-dpY0OC90ijDX-zU_5sDjX6xdLgCyHuO1qN3HVXkgaTgq_nxpOtO-BiR8")
-        transcript = transcribe_audio(audio, rev_ai_api_key)
+        print("Sending transcription to ChatGPT...")
+        gpt_response = call_openai_api(transcription)
+        conversation_history.append({"role": "user", "content": transcription})
+        conversation_history.append({"role": "assistant", "content": gpt_response})
+        for message in conversation_history:
+            print(f"{message['role'].capitalize()}: {message['content']}")
 
-        # Generate response using OpenAI API
-        response = call_openai_api(transcript)
-        print("AI: ", response)
+        print("Converting ChatGPT response to speech...")
+        speech_file_path = text_to_speech(gpt_response)
+        print(f"Speech saved to: {speech_file_path}")
 
-        # Ask user if they want to continue
-        user_input = input("You: ")
-        if user_input.lower() == 'exit':
+        print("Playing the audio...")
+        play_audio(speech_file_path)
+
+        user_decision = timed_input("Press 'enter' to restart or type 'exit' to stop:", 5)
+        if user_decision == "exit":
+            print("Exiting program.")
             break
-
 
 if __name__ == "__main__":
     main()
