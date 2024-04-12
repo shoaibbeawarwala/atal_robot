@@ -84,13 +84,14 @@ def text_to_speech(text, voice="echo"):
         input=str(text)
     )
     response.stream_to_file(speech_file_path)
-    return speech_file_path
-
+    reternal speech_file_path
+    
 def play_audio(file_path):
-    data, samplerate = sf.read(file_path)
-    sd.play(data, samplerate)
-    sd.wait()
-
+    pygame.mixer.init()
+    pygame.mixer.music.load(file_path)
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        pygame.time.Clock().tick(10)
 def timed_input(prompt, timeout=8):
     print(prompt)
     input_str = [None]  # Use a list to modify it within the nested function
